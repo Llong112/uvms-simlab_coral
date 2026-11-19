@@ -16,6 +16,7 @@
 #!/usr/bin/env python3
 import copy
 from datetime import datetime
+from functools import partial
 from simlab.uvms_parameters import ReachParams
 import rclpy
 from rclpy.node import Node
@@ -201,6 +202,11 @@ class UVMSBackendCore:
             f"Vehicle trajectory generator: {self.vehicle_trajectory_generator_name}"
         )
         self.robots_prefix = self.node.get_parameter('robots_prefix').value
+        description_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.selected_description_pub = self.node.create_publisher(
+            String, 'rviz/selected_robot_description', description_qos
+        )
+        self.robot_descriptions = {}
 
         if not self.node.has_parameter("robot_types"):
             self.node.declare_parameter("robot_types", ["dory"])
@@ -222,6 +228,10 @@ class UVMSBackendCore:
             raise ValueError("robot_types entries must be dory or blueboat.")
 
         for k, prefix in enumerate(self.robots_prefix):
+            self.node.create_subscription(
+                String, f"{prefix.rstrip('_')}/robot_description",
+                partial(self._robot_description_cb, prefix), description_qos,
+            )
             planner = PathPlanner(self.planner_marker_publisher, ns=f"planner/{prefix}", base_id=k)
             vehicle_cart_traj = vehicle_trajectory_generator_cls(
                 self.node,
@@ -1349,12 +1359,19 @@ class UVMSBackendCore:
     def fcl_update_callback(self):
         self.fcl_world.update_from_tf(self.tf_buffer, rclpy.time.Time())
 
+    def _robot_description_cb(self, prefix, msg):
+        self.robot_descriptions[prefix] = msg
+        if self.robot_selected is not None and self.robot_selected.prefix == prefix:
+            self.selected_description_pub.publish(msg)
+
     def set_robot_selected(self, robot_k):
         for r in self.robots:
             if r.k_robot == robot_k:
                 if getattr(self, "robot_selected", None) is r:
                     return
                 self.robot_selected = r
+                if r.prefix in self.robot_descriptions:
+                    self.selected_description_pub.publish(self.robot_descriptions[r.prefix])
                 self.node.get_logger().info(f"Robot {self.robot_selected.prefix} selected for planning.")
                 self._set_camera_frame_for_robot(self.robot_selected)
                 return
