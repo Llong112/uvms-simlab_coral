@@ -1378,7 +1378,8 @@ class UVMSBackendCore:
         blue = ColorRGBA(b=1.0, a=1.0)
         markers = [Marker(header=Header(frame_id=self.world_frame), action=Marker.DELETEALL)]
         for frame in frames:
-            axes = Marker(ns=frame, type=Marker.LINE_LIST, frame_locked=True)
+            namespace = f'blueboat/{frame}' if robot.is_surface_vehicle and frame in ('base_link', 'dvl_link') else frame
+            axes = Marker(ns=namespace, type=Marker.LINE_LIST, frame_locked=True)
             axes.header.frame_id = robot.prefix + frame
             axes.pose.orientation.w = 1.0
             axes.scale.x = 0.02
