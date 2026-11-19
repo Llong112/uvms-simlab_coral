@@ -2,6 +2,7 @@
 
 A field-ready ROS 2 lab for **Underwater Vehicle–Manipulator Systems**. `uvms_simlab` layers interactive teleoperation, collision-aware planning, and hardware-in-the-loop tooling on top of [uvms-simulator](https://github.com/edxmorgan/uvms-simulator) so you can go from concept to wet tests without rebuilding infrastructure.
 
+**Using the BlueBoat simulator?** This companion supplies surface planning, timed trajectory references, the BlueBoat controllers, and their RViz menus. You need both forks on `lance/blueboat` in the same workspace. Use the simulator README to [install both forks](https://github.com/Llong112/uvms-simulator_coral/blob/lance/blueboat/README.md#1-install-the-blueboat-simulator-on-a-fresh-computer) and [run BlueBoat and choose a controller](https://github.com/Llong112/uvms-simulator_coral/blob/lance/blueboat/README.md#2-run-blueboat-switch-vessels-and-choose-a-controller).
 
 ## Highlights
 
