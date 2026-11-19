@@ -12,11 +12,19 @@ def dynamics_profiles_root() -> Path:
     return Path(ament_index_python.get_package_share_directory("simlab")) / "dynamics_profiles"
 
 
-def list_robot_dynamics_profiles() -> list[str]:
+def list_robot_dynamics_profiles(robot_type: str | None = None) -> list[str]:
     root = dynamics_profiles_root()
     if not root.exists():
         return []
-    return sorted(path.stem for path in root.glob("*.json") if path.is_file())
+    names = sorted(path.stem for path in root.glob("*.json") if path.is_file())
+    if robot_type is None:
+        return names
+    return [
+        name for name in names
+        if is_valid_robot_dynamics_profile(
+            load_robot_dynamics_profile(name), robot_type=robot_type
+        )
+    ]
 
 
 def resolve_robot_dynamics_profile(profile_name: str) -> Path:
@@ -46,9 +54,22 @@ def load_robot_dynamics_profile(profile_name: str, node: Node | None = None) -> 
     return loaded
 
 
-def is_valid_robot_dynamics_profile(profile: dict) -> bool:
+def is_valid_robot_dynamics_profile(profile: dict, robot_type: str | None = None
+) -> bool:
     if not isinstance(profile, dict):
         return False
+
+    if robot_type is not None:
+        kind = str(profile.get("robot_type", "dory")).strip().lower()
+        if kind != robot_type:
+            return False
+        if robot_type == "blueboat" and (
+            not isinstance(profile.get("vehicle"), dict)
+            or profile.get("manipulator") is not None
+            or profile.get("use_coupled_dynamics", False) is not False
+        ):
+            return False
+
     return (
         isinstance(profile.get("manipulator"), dict)
         or isinstance(profile.get("vehicle"), dict)

@@ -45,6 +45,7 @@ class PlannerActionClient:
         time_limit: float,
         robot_collision_radius: float,
         dynamic_obstacle_prediction_speed: float = 0.0,
+        surface_motion: bool = False,
     ) -> bool:
         if self._busy:
             self._node.get_logger().warn(f"{self._tag} action already running; ignoring request.")
@@ -62,6 +63,7 @@ class PlannerActionClient:
         goal_msg.time_limit = float(time_limit)
         goal_msg.robot_collision_radius = float(robot_collision_radius)
         goal_msg.dynamic_obstacle_prediction_speed = max(0.0, float(dynamic_obstacle_prediction_speed))
+        goal_msg.surface_motion = bool(surface_motion)
         self._busy = True
         self._node.get_logger().info(
             f"{self._tag} sending planner request "

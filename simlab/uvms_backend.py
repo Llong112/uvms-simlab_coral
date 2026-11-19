@@ -201,6 +201,26 @@ class UVMSBackendCore:
             f"Vehicle trajectory generator: {self.vehicle_trajectory_generator_name}"
         )
         self.robots_prefix = self.node.get_parameter('robots_prefix').value
+
+        if not self.node.has_parameter("robot_types"):
+            self.node.declare_parameter("robot_types", ["dory"])
+
+        self.robot_types = [
+            str(kind).strip().lower()
+            for kind in self.node.get_parameter("robot_types").value
+        ]
+
+        if len(self.robot_types) == 1:
+            self.robot_types *= len(self.robots_prefix)
+
+        if len(self.robot_types) != len(self.robots_prefix):
+            raise ValueError(
+                "robot_types must contain one type or one type per robot prefix."
+            )
+
+        if any(kind not in ("dory", "blueboat") for kind in self.robot_types):
+            raise ValueError("robot_types entries must be dory or blueboat.")
+
         for k, prefix in enumerate(self.robots_prefix):
             planner = PathPlanner(self.planner_marker_publisher, ns=f"planner/{prefix}", base_id=k)
             vehicle_cart_traj = vehicle_trajectory_generator_cls(
@@ -220,6 +240,7 @@ class UVMSBackendCore:
                 vehicle_cart_traj,
                 world_frame=self.world_frame,
                 create_subscriptions=False,
+                robot_type=self.robot_types[k],
             )
             robot_k.set_control_mode(ControlMode.PLANNER)
             robot_k.dynamic_obstacle_snapshot_provider = self.dynamic_obstacle_snapshot_for_recording
@@ -711,7 +732,11 @@ class UVMSBackendCore:
 
     def set_vehicle_target(self, robot: Robot, pose: Pose) -> tuple[bool, str]:
         self.set_robot_selected(robot.k_robot)
-        self.target_vehicle_pose, clipped = self._clip_pose_to_environment_bounds(pose)
+        target, clipped = self._clip_pose_to_environment_bounds(pose)
+        target = robot.project_vehicle_goal(target)
+        if target is None:
+            return False, f"vehicle target rejected for {robot.prefix}: current pose is unavailable"
+        self.target_vehicle_pose = target
         suffix = " within environment bounds" if clipped else ""
         return True, f"vehicle target set for {robot.prefix}{suffix}"
 
@@ -742,12 +767,17 @@ class UVMSBackendCore:
             if not ok:
                 return False, message
         count = self.add_selected_vehicle_waypoint()
+        if count <= 0:
+            return False, f"waypoint rejected for {robot.prefix}: current pose is unavailable"
         return True, f"added waypoint {count} for {robot.prefix}"
 
     def reset_vehicle_world(self, robot: Robot, pose: Pose) -> tuple[bool, str]:
         if "real" in robot.prefix:
             return False, f"world-frame reset is disabled for real robot {robot.prefix}"
 
+        pose = robot.project_vehicle_goal(pose)
+        if pose is None:
+            return False, f"world-frame reset rejected for {robot.prefix}: current pose is unavailable"
         xyz_world = np.array([pose.position.x, pose.position.y, pose.position.z], dtype=float)
         clipped_xyz = self.fcl_world.enforce_bounds(xyz_world)
         if not np.allclose(xyz_world, clipped_xyz):
@@ -1077,6 +1107,11 @@ class UVMSBackendCore:
         if self.robot_selected.task_based_controller:
             self.node.get_logger().warn("Vehicle waypoints are only available for vehicle path planning.")
             return 0
+        target = self.robot_selected.project_vehicle_goal(self.target_vehicle_pose)
+        if target is None:
+            self.node.get_logger().warn("Cannot add waypoint: current vehicle pose is unavailable.")
+            return 0
+        self.target_vehicle_pose = target
         mission = self.selected_vehicle_waypoint_mission()
         count = mission.add_waypoint(self.target_vehicle_pose)
         self.node.get_logger().info(
@@ -1416,6 +1451,11 @@ class UVMSBackendCore:
         return True
     
     def target_vehicle_in_world_tf_timer_callback(self):
+        if self.robot_selected is not None and self.robot_selected.is_surface_vehicle:
+            target = self.robot_selected.project_vehicle_goal(self.target_vehicle_pose)
+            if target is None:
+                return
+            self.target_vehicle_pose = target
         stamp_now = self.node.get_clock().now().to_msg()
         vehicle_target_t = geometry.get_broadcast_tf(stamp=stamp_now,
                                                            pose=self.target_vehicle_pose,
@@ -1711,6 +1751,8 @@ class UVMSBackendCore:
         return msg
 
     def plan_and_execute_task_trajectory_wrt_vehicle(self):
+        if not self.robot_selected.has_manipulator:
+            return
         if self.robot_selected.sim_reset_hold:
             return
         if not self.robot_selected.task_based_controller:

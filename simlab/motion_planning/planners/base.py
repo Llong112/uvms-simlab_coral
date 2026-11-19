@@ -7,6 +7,7 @@ from rclpy.node import Node
 class PlannerTemplate(ABC):
     registry_name: str = ""
     visible: bool = True
+    supports_surface_motion: bool = False
 
     def __init__(self, node: Node):
         self.node = node

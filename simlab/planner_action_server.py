@@ -79,6 +79,10 @@ class PlannerActionServer(Node):
             and goal_request.robot_collision_radius > 0.0
             and goal_request.dynamic_obstacle_prediction_speed >= 0.0
             and goal_request.planner_name in self._planners
+            and (
+                not goal_request.surface_motion
+                or getattr(self._planners[goal_request.planner_name], "supports_surface_motion", False)
+            )
         )
         if not valid:
             self.get_logger().warn(
@@ -177,6 +181,7 @@ class PlannerActionServer(Node):
             feedback_msg.stage = "planning"
             goal_handle.publish_feedback(feedback_msg)
 
+            surface_kwargs = {"surface_motion": True} if req.surface_motion else {}
             plan = planner.plan_vehicle(
                 start_xyz=req.start_xyz,
                 start_quat_wxyz=req.start_quat_wxyz,
@@ -185,6 +190,7 @@ class PlannerActionServer(Node):
                 time_limit=float(req.time_limit),
                 robot_collision_radius=float(req.robot_collision_radius),
                 dynamic_obstacle_prediction_speed=float(req.dynamic_obstacle_prediction_speed),
+                **surface_kwargs,
             )
         except Exception as ex:
             goal_handle.abort()

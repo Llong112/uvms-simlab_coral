@@ -1,4 +1,6 @@
 import numpy as np
+from pathlib import Path as _MeshPath
+from ament_index_python.packages import get_package_share_directory as _get_ros_package_share
 import trimesh, fcl
 from visualization_msgs.msg import Marker
 from std_msgs.msg import ColorRGBA
@@ -26,6 +28,10 @@ def se3_from_rpy_xyz(rpy, xyz):
     return T
 
 def fcl_bvh_from_mesh(path, scale=[1.0, 1.0, 1.0], rpy=(0.0, 0.0, 0.0), xyz=(0.0, 0.0, 0.0)):
+    if isinstance(path, str) and path.startswith("package://"):
+        package_name, relative_path = path[len("package://"):].split("/", 1)
+        path = str(_MeshPath(_get_ros_package_share(package_name)) / relative_path)
+
     scene_or_mesh = trimesh.load(path, force='scene')
     mesh = scene_or_mesh.dump(concatenate=True) if isinstance(scene_or_mesh, trimesh.Scene) else scene_or_mesh
     if scale != 1.0:

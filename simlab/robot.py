@@ -67,7 +67,7 @@ from dataclasses import dataclass
 from simlab.msg import ControllerPerformance
 from simlab.reference_targets import ReferenceTargetPublisher
 from simlab.planner_action_client import PlannerActionClient
-from simlab.motion_planning.planners import visible_planner_names
+from simlab.motion_planning.planners import DEFAULT_PLANNER_CLASSES, visible_planner_names
 from simlab.performance_metrics import ControllerPerformanceMetrics
 
 
@@ -491,8 +491,16 @@ class Robot(Base):
                   planner=None,
                   vehicle_cart_traj=None,
                   world_frame: str = "world",
-                  create_subscriptions: bool = True):
+                  create_subscriptions: bool = True,
+                  robot_type: str = "dory"):
         self.planner: PathPlanner = planner
+        self.robot_type = str(robot_type).strip().lower()
+
+        if self.robot_type not in ("dory", "blueboat"):
+            raise ValueError("robot_type must be dory or blueboat.")
+
+        self.has_manipulator = self.robot_type == "dory"
+        self.is_surface_vehicle = self.robot_type == "blueboat"
         self.vehicle_cart_traj: VehicleTrajectoryGeneratorTemplate = vehicle_cart_traj
         self.menu_handle = None
         self.final_goal_map_ned_6 = None
@@ -531,7 +539,9 @@ class Robot(Base):
         
         self.k_robot = k_robot
         self.user_id = None
-        self.robot_name = f'uvms {prefix}: {k_robot}'
+        self.robot_name = (
+            f"{'BlueBoat' if self.is_surface_vehicle else 'uvms'} {prefix}: {k_robot}"
+        )
     
         package_share_directory = ament_index_python.get_package_share_directory(
                 'simlab')
@@ -586,6 +596,7 @@ class Robot(Base):
         self.prefix = prefix
         self.status = 'inactive'
         self.sim_time = 0.0
+        self.vehicle_sim_period = 0.0
         self.start_time = 0.0
         self.joint4_frame = f"{self.prefix}joint_4"
         self.pose_command = [0.0]*6
@@ -600,6 +611,9 @@ class Robot(Base):
         self.controller_instances = [
             controller_class(self.node, self.n_joint, self.prefix)
             for controller_class in DEFAULT_CONTROLLER_CLASSES
+            if self.robot_type in getattr(
+                controller_class, "supported_robot_types", ("dory",)
+            )
         ]
         self.planner_action_client = PlannerActionClient(
             self.node,
@@ -668,7 +682,7 @@ class Robot(Base):
         self._replay_settle_config = {}
         self._replay_settle_arm_target = None
         self._replay_settle_vehicle_target = None
-        self.sim_reset_hold = False
+        self.sim_reset_hold = self.is_surface_vehicle
         if not self.node.has_parameter("cmd_replay_record_dir"):
             self.node.declare_parameter("cmd_replay_record_dir", "~/ros_ws/recordings/replay_sessions")
         self.cmd_replay_record_dir = FilePath(
@@ -780,15 +794,31 @@ class Robot(Base):
             )
 
         # Bind the default controller without activating closed-loop publishing.
-        self.set_controller("PID", activate=False)
+        self.set_controller(
+            "Surface" if self.is_surface_vehicle else "PID",
+            activate=False,
+        )
 
         # Active path planner
         self.planner_name = None
 
         for planner_name in visible_planner_names():
+            if self.is_surface_vehicle and not any(
+                cls.registry_name == planner_name
+                and getattr(cls, "supports_surface_motion", False)
+                for cls in DEFAULT_PLANNER_CLASSES
+            ):
+                continue
             self.register_planner(name=planner_name)
 
         self.set_planner("Bitstar")
+
+        self._surface_profile_load_pending = False
+        self._surface_profile_timer = None
+        if self.is_surface_vehicle:
+            self._surface_profile_timer = self.node.create_timer(
+                1.0, self._load_initial_surface_profile
+            )
 
     def register_controller(
                 self,
@@ -978,10 +1008,14 @@ class Robot(Base):
         return sorted(list(self._planners.keys()))
 
     def set_control_space(self, control_space_name: str) -> None:
+        if not self.has_manipulator and control_space_name != ControlSpace.JOINT_SPACE:
+            return
         self.control_space = control_space_name
         self.task_based_controller = (control_space_name == ControlSpace.TASK_SPACE)
 
     def list_control_spaces(self) -> list:
+        if not self.has_manipulator:
+            return [ControlSpace.JOINT_SPACE.value]
         return [m.value for m in ControlSpace]
     
     @classmethod
@@ -1076,7 +1110,10 @@ class Robot(Base):
             err_goal_rotation = np.abs(err_goal[3:])
 
         q_curr = np.asarray(st["q"], dtype=float).tolist()
-        q_des  = np.asarray(self.arm.q_command, dtype=float).tolist()
+        q_des  = (
+            np.asarray(self.arm.q_command, dtype=float).tolist()
+            if self.has_manipulator else []
+        )
         err_joints = [np.abs((Xd - Xc)) for Xd, Xc in zip(q_des, q_curr)]
 
         return err_wp_trans, err_wp_rotation, err_joints, err_goal_trans, err_goal_rotation
@@ -1118,7 +1155,17 @@ class Robot(Base):
 
 
     def update_state(self, msg: DynamicJointState):
-        self.arm.update_state(msg)
+        if self.floating_base_IOs not in msg.joint_names:
+            return
+
+        if self.has_manipulator:
+            self.arm.update_state(msg)
+        else:
+            self.vehicle_sim_period = self.get_interface_value(
+                msg,
+                [self.floating_base_IOs],
+                [Axis_Interface_names.sim_period],
+            )[0]
         self.ned_pose = self.get_interface_value(
             msg,
             [self.floating_base_IOs] * 6,
@@ -1186,27 +1233,30 @@ class Robot(Base):
             [self.floating_base_IOs],
             [Axis_Interface_names.floating_control_energy_abs]
         )[0]
-        self.arm_control_power = self.get_interface_value(
-            msg,
-            [self.arm_IOs],
-            [Axis_Interface_names.arm_control_power_abs]
-        )[0]
-        self.arm_control_energy = self.get_interface_value(
-            msg,
-            [self.arm_IOs],
-            [Axis_Interface_names.arm_control_energy_abs]
-        )[0]
-        self.arm_payload_mass = self.get_interface_value(
-            msg,
-            [self.arm_IOs],
-            [Axis_Interface_names.arm_payload_mass]
-        )[0]
-        self.arm_gravity = self.get_interface_value(
-            msg,
-            [self.arm_IOs],
-            [Axis_Interface_names.arm_gravity]
-        )[0]
-   
+        
+        
+        if self.has_manipulator:
+            self.arm_control_power = self.get_interface_value(
+                msg,
+                [self.arm_IOs],
+                [Axis_Interface_names.arm_control_power_abs]
+            )[0]
+            self.arm_control_energy = self.get_interface_value(
+                msg,
+                [self.arm_IOs],
+                [Axis_Interface_names.arm_control_energy_abs]
+            )[0]
+            self.arm_payload_mass = self.get_interface_value(
+                msg,
+                [self.arm_IOs],
+                [Axis_Interface_names.arm_payload_mass]
+            )[0]
+            self.arm_gravity = self.get_interface_value(
+                msg,
+                [self.arm_IOs],
+                [Axis_Interface_names.arm_gravity]
+            )[0]
+    
         dynamics_sim_time = self.get_interface_value(msg,[self.floating_base_IOs],[Axis_Interface_names.sim_time])[0]
         if self.status == 'inactive':
             self.start_time = copy.copy(dynamics_sim_time)
@@ -1215,7 +1265,19 @@ class Robot(Base):
             self.sim_time = dynamics_sim_time - self.start_time
 
     def get_state(self) -> Dict:
-        xq = self.arm.get_state()
+        if self.has_manipulator:
+            xq = self.arm.get_state()
+        else:
+            xq = {
+                "arm_effort": [],
+                "grasper_q": [],
+                "grasper_qdot": [],
+                "grasper_qddot": [],
+                "q": [],
+                "dq": [],
+                "ddq": [],
+                "dt": self.vehicle_sim_period,
+            }
         xq['name'] = self.prefix
         xq['pose'] = self.ned_pose
         xq['body_vel'] = self.body_vel
@@ -1269,9 +1331,9 @@ class Robot(Base):
             "pose": self.pose_command,
             "body_vel": self.body_vel_command,
             "body_acc": self.body_acc_command,
-            "q": self.arm.q_command,
-            "dq": self.arm.dq_command,
-            "ddq": self.arm.ddq_command,
+            "q": self.arm.q_command if self.has_manipulator else [],
+            "dq": self.arm.dq_command if self.has_manipulator else [],
+            "ddq": self.arm.ddq_command if self.has_manipulator else [],
             "trajectory_direction": self._reference_trajectory_direction_ned(),
         }
         return self.performance_metrics.update(
@@ -1681,13 +1743,15 @@ class Robot(Base):
     ) -> None:
         container = FullRobotMsg(prefix=self.prefix)
         container.set_vehicle_wrench(wrench_body_6)
-        container.set_arm_effort(arm_effort_5)
-
-        veh_msg = container.to_vehicle_dynamic_group(self.node.get_clock().now().to_msg())
-        arm_msg = container.to_arm_effort_array()
-
+        veh_msg = container.to_vehicle_dynamic_group(
+            self.node.get_clock().now().to_msg()
+        )
         self.vehicle_effort_command_publisher.publish(veh_msg)
-        self.manipulator_effort_command_publisher.publish(arm_msg)
+
+        if self.has_manipulator:
+            container.set_arm_effort(arm_effort_5)
+            arm_msg = container.to_arm_effort_array()
+            self.manipulator_effort_command_publisher.publish(arm_msg)
         self._publish_controller_performance_metrics()
     
     def _now_sec(self) -> float:
@@ -1703,6 +1767,8 @@ class Robot(Base):
             self._menu_grasper_until_sec = 0.0
 
     def command_grasper_from_menu(self, action: str) -> bool:
+        if not self.has_manipulator:
+            return False
         if self.control_mode != ControlMode.PLANNER or self._active_controller_is_replay():
             self._clear_menu_grasper_effort()
             self.node.get_logger().warn(
@@ -1778,6 +1844,8 @@ class Robot(Base):
         self.update_state(msg)
 
     def world_robot_task_pose_callback(self):
+        if not self.has_manipulator:
+            return
         pose_world = self.get_frame_pose_in_frame(self.joint4_frame, self.world_frame)
         if pose_world is None:
             return
@@ -1790,6 +1858,19 @@ class Robot(Base):
             dtype=float
         )
         return xyz, quat_wxyz
+
+    def project_vehicle_goal(self, goal_pose: Pose) -> Optional[Pose]:
+        goal = copy.deepcopy(goal_pose)
+        if not self.is_surface_vehicle:
+            return goal
+        pose_now = self._pose_from_state_in_frame(self.world_frame)
+        if pose_now is None:
+            return None
+        goal.position.z = float(pose_now.position.z)
+        q = goal.orientation
+        quat = yaw_only_quat_wxyz([q.w, q.x, q.y, q.z])
+        q.w, q.x, q.y, q.z = [float(value) for value in quat]
+        return goal
 
     def _get_vehicle_goal_from_marker(self, goal_pose:Pose):
         goal_xyz = np.array([goal_pose.position.x, goal_pose.position.y, goal_pose.position.z], dtype=float)
@@ -2032,6 +2113,9 @@ class Robot(Base):
         if pose_now is None:
             self.node.get_logger().warn("Planner action request was not sent, current pose unavailable.")
             return False
+        goal_pose = self.project_vehicle_goal(goal_pose)
+        if goal_pose is None:
+            return False
         if preempt_current:
             self.abrupt_planner_stop(publish_zero=False)
         self._accept_planner_results = True
@@ -2058,6 +2142,7 @@ class Robot(Base):
             time_limit=float(time_limit),
             robot_collision_radius=float(robot_collision_radius),
             dynamic_obstacle_prediction_speed=max(0.0, float(dynamic_obstacle_prediction_speed)),
+            surface_motion=self.is_surface_vehicle,
         )
 
         if sent:
@@ -2202,6 +2287,8 @@ class Robot(Base):
             
             if target_pose_map_ned is not None and tw6_map_ned is not None and acc6_map_ned is not None:
                 p_cmd_ned, rpy_cmd_ned = target_pose_map_ned
+                if self.is_surface_vehicle:
+                    rpy_cmd_ned[2] = float(self.final_goal_map_ned_6[5])
 
                 yaw_mode = str(getattr(self, "vehicle_path_yaw_mode", "path_heading")).strip().lower()
                 if yaw_mode == "hold":
@@ -2889,6 +2976,8 @@ class Robot(Base):
             self.publish_commands([0.0]*6, [0.0]*5)
 
     def close(self) -> None:
+        if self._surface_profile_timer is not None:
+            self._surface_profile_timer.cancel()
         self._stop_replay_session_recording("shutdown")
         self._accept_planner_results = False
         if self.vehicle_cart_traj is not None:
@@ -2903,7 +2992,7 @@ class Robot(Base):
 
     def reset_simulation(self) -> None:
         request = ResetSimUvms.Request()
-        request.reset_manipulator = True
+        request.reset_manipulator = self.has_manipulator
         request.reset_vehicle = True
         request.hold_commands = True
         request.use_manipulator_state = False
@@ -2991,9 +3080,34 @@ class Robot(Base):
                     on_failure()
 
         future.add_done_callback(_done_callback)
+    def _load_initial_surface_profile(self) -> None:
+        if not self.is_surface_vehicle:
+            return
+        if self.active_dynamics_profile:
+            self._surface_profile_timer.cancel()
+            return
+        if (
+            self._surface_profile_load_pending
+            or not self.set_sim_dynamics_client.service_is_ready()
+        ):
+            return
 
+        self._surface_profile_load_pending = True
+
+        def _finished():
+            self._surface_profile_load_pending = False
+
+        try:
+            self.apply_dynamics_profile(
+                "blueboat", on_success=_finished, on_failure=_finished
+            )
+        except Exception as exc:
+            _finished()
+            self.node.get_logger().warn(
+                f"[{self.prefix}] initial BlueBoat profile load failed: {exc}"
+            )
     def list_dynamics_profiles(self) -> list[str]:
-        return list_robot_dynamics_profiles()
+        return list_robot_dynamics_profiles(robot_type=self.robot_type)
 
     def _apply_camera_profile_dynamics(
         self,
@@ -3049,7 +3163,11 @@ class Robot(Base):
 
     def apply_dynamics_profile(self, profile_name: str, on_success=None, on_failure=None) -> None:
         profile = load_robot_dynamics_profile(profile_name, self.node)
-        if not is_valid_robot_dynamics_profile(profile):
+        if not is_valid_robot_dynamics_profile(profile, robot_type=self.robot_type):
+            self.node.get_logger().warn(
+                f"[{self.prefix}] profile '{profile_name}' is invalid or incompatible "
+                f"with robot type '{self.robot_type}'."
+            )
             if on_failure is not None:
                 on_failure()
             return
@@ -3125,6 +3243,13 @@ class Robot(Base):
         future.add_done_callback(_done_callback)
 
     def release_simulation(self, on_success=None, on_failure=None) -> None:
+        if self.is_surface_vehicle and not self.active_dynamics_profile:
+            self.node.get_logger().warn(
+                f"[{self.prefix}] release blocked: BlueBoat dynamics profile is not loaded."
+            )
+            if on_failure is not None:
+                on_failure()
+            return
         previous_hold = self.sim_reset_hold
 
         def _on_release_success():
@@ -3160,10 +3285,11 @@ class Robot(Base):
         self.pose_command = [0.0] * 6
         self.body_vel_command = [0.0] * 6
         self.body_acc_command = [0.0] * 6
-        self.arm.q_command = ReachParams.joint_home.tolist()
-        self.arm.dq_command = np.zeros((4,), dtype=float).tolist()
-        self.arm.ddq_command = np.zeros((4,), dtype=float).tolist()
-        self.arm.close_grasper()
+        if self.has_manipulator:
+            self.arm.q_command = ReachParams.joint_home.tolist()
+            self.arm.dq_command = np.zeros((4,), dtype=float).tolist()
+            self.arm.ddq_command = np.zeros((4,), dtype=float).tolist()
+            self.arm.close_grasper()
 
     def clear_robot_path_history(self) -> None:
         self.traj_path_poses = []
@@ -3278,12 +3404,15 @@ class Robot(Base):
         if pose.size >= 5:
             pose[3] = 0.0  # roll
             pose[4] = 0.0  # pitch
+        if self.is_surface_vehicle:
+            pose[2] = float(st["pose"][2])
         self.pose_command = pose.tolist()
         self.body_vel_command = [0.0] * 6
         self.body_acc_command = [0.0] * 6
-        self.arm.q_command = np.asarray(st["q"], dtype=float)[:4].tolist()
-        self.arm.dq_command = np.zeros((4,), dtype=float).tolist()
-        self.arm.ddq_command = np.zeros((4,), dtype=float).tolist()
+        if self.has_manipulator:
+            self.arm.q_command = np.asarray(st["q"], dtype=float)[:4].tolist()
+            self.arm.dq_command = np.zeros((4,), dtype=float).tolist()
+            self.arm.ddq_command = np.zeros((4,), dtype=float).tolist()
         self.enable_planner_output()
 
     def hold_current_state_with_feedback(self) -> None:
@@ -3294,10 +3423,11 @@ class Robot(Base):
         state = self.get_state()
         if state["status"] != "active":
             return
-        if self.sim_reset_hold:
+        if self.sim_reset_hold or (
+            self.is_surface_vehicle and not self.active_dynamics_profile
+        ):
             self.publish_commands([0.0] * 6, [0.0] * 5)
             return
-
         if self.control_mode == ControlMode.TELEOP:
             # read teleop commands and publish
             wrench = getattr(self, "teleop_wrench_body_6", [0.0]*6)
@@ -3591,18 +3721,24 @@ class Robot(Base):
                 dt=state["dt"],
             )
 
-            q_ref = list(self.arm.q_command) + [self.arm.grasp_command]
-            dq_ref = list(self.arm.dq_command) + [0.0]
-            ddq_ref = list(self.arm.ddq_command) + [0.0]
+            q_ref = [0.0] * 5
+            dq_ref = [0.0] * 5
+            ddq_ref = [0.0] * 5
+            cmd_arm_tau = np.zeros(5, dtype=float)
 
-            cmd_arm_tau = self.arm_controller_fn(
-                q=list(state["q"]) + list(state["grasper_q"]),
-                q_dot=list(state["dq"]) + list(state["grasper_qdot"]),
-                q_ref=q_ref,
-                dq_ref=dq_ref,
-                ddq_ref=ddq_ref,
-                dt=state["dt"],
-            )
+            if self.has_manipulator:
+                q_ref = list(self.arm.q_command) + [self.arm.grasp_command]
+                dq_ref = list(self.arm.dq_command) + [0.0]
+                ddq_ref = list(self.arm.ddq_command) + [0.0]
+
+                cmd_arm_tau = self.arm_controller_fn(
+                    q=list(state["q"]) + list(state["grasper_q"]),
+                    q_dot=list(state["dq"]) + list(state["grasper_qdot"]),
+                    q_ref=q_ref,
+                    dq_ref=dq_ref,
+                    ddq_ref=ddq_ref,
+                    dt=state["dt"],
+                )
 
             self.reference_pub.publish_map_targets_and_arm_refs(
                 target_ned_pose=target_ned_pose,

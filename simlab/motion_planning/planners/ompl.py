@@ -13,6 +13,7 @@ from scipy.spatial.transform import Rotation as R
 from simlab.fcl_checker import FCLWorld
 from simlab.planner_world import PlannerWorld
 from simlab.motion_planning.planners.base import PlannerTemplate
+from simlab.motion_planning.planners.surface import plan_surface_path
 from simlab.motion_planning.result import MotionPlanResult, MotionPlanKind
 
 try:
@@ -373,6 +374,7 @@ class OmplPlanner:
 
 class Se3OmplPlannerBase(PlannerTemplate):
     ompl_planner_type: str = ""
+    supports_surface_motion: bool = True
 
     def __init__(self, node: Node):
         super().__init__(node)
@@ -392,7 +394,19 @@ class Se3OmplPlannerBase(PlannerTemplate):
         time_limit: float,
         robot_collision_radius: float,
         dynamic_obstacle_prediction_speed: float = 0.0,
+        surface_motion: bool = False,
     ) -> MotionPlanResult:
+        if surface_motion:
+            return plan_surface_path(
+                self._planner,
+                start_xyz=start_xyz,
+                start_quat_wxyz=start_quat_wxyz,
+                goal_xyz=goal_xyz,
+                goal_quat_wxyz=goal_quat_wxyz,
+                time_limit=float(time_limit),
+                planner_type=str(self.ompl_planner_type),
+                dynamic_obstacle_prediction_speed=float(dynamic_obstacle_prediction_speed),
+            )
         return self._planner.plan_se3_path(
             start_xyz=start_xyz,
             start_quat_wxyz=start_quat_wxyz,

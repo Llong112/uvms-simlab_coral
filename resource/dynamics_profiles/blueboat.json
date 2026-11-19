@@ -1,0 +1,103 @@
+{
+  "use_coupled_dynamics": false,
+  "vehicle": {
+    "m_x_du": 20.0,
+    "m_y_dv": 30.0,
+    "m_z_dw": 0.0,
+    "mz_g_x_dq": 0.0,
+    "mz_g_y_dp": 0.0,
+    "mz_g_k_dv": 0.0,
+    "mz_g_m_du": 0.0,
+    "i_x_k_dp": 0.0,
+    "i_y_m_dq": 0.0,
+    "i_z_n_dr": 4.0,
+    "weight": 0.0,
+    "buoyancy": 0.0,
+    "x_g_weight_minus_x_b_buoyancy": 0.0,
+    "y_g_weight_minus_y_b_buoyancy": 0.0,
+    "z_g_weight_minus_z_b_buoyancy": 0.0,
+    "x_u": -10.0,
+    "y_v": -15.0,
+    "z_w": 0.0,
+    "k_p": 0.0,
+    "m_q": 0.0,
+    "n_r": -2.0,
+    "x_uu": 0.0,
+    "y_vv": 0.0,
+    "z_ww": 0.0,
+    "k_pp": 0.0,
+    "m_qq": 0.0,
+    "n_rr": 0.0,
+    "current_velocity": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "thrust_configuration_matrix": [
+      [
+        1.0,
+        1.0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0.295,
+        -0.295,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "robot_type": "blueboat"
+}
