@@ -29,12 +29,12 @@ import os
 import ament_index_python
 from simlab.utils import geometry
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSDurabilityPolicy, QoSReliabilityPolicy
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 import tf2_ros
 from typing import Dict, List
 from simlab.robot import Robot, ControlMode
-from geometry_msgs.msg import Pose
-from std_msgs.msg import Header, String
+from geometry_msgs.msg import Point, Pose
+from std_msgs.msg import ColorRGBA, Header, String
 import sensor_msgs_py.point_cloud2 as pc2
 from sensor_msgs.msg import PointCloud2
 from geometry_msgs.msg import PoseStamped
@@ -205,6 +205,9 @@ class UVMSBackendCore:
         description_qos = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
         self.selected_description_pub = self.node.create_publisher(
             String, 'rviz/selected_robot_description', description_qos
+        )
+        self.selected_axes_pub = self.node.create_publisher(
+            MarkerArray, 'rviz/selected_vessel_axes', description_qos
         )
         self.robot_descriptions = {}
 
@@ -1364,6 +1367,27 @@ class UVMSBackendCore:
         if self.robot_selected is not None and self.robot_selected.prefix == prefix:
             self.selected_description_pub.publish(msg)
 
+    def _publish_selected_axes(self, robot):
+        frames = ['base_link', 'map', 'dvl_link']
+        if robot.has_manipulator:
+            frames.extend(f'joint_{i}' for i in range(5))
+
+        points = [Point(), Point(x=0.1), Point(), Point(y=0.1), Point(), Point(z=0.1)]
+        red = ColorRGBA(r=1.0, a=1.0)
+        green = ColorRGBA(g=1.0, a=1.0)
+        blue = ColorRGBA(b=1.0, a=1.0)
+        markers = [Marker(header=Header(frame_id=self.world_frame), action=Marker.DELETEALL)]
+        for frame in frames:
+            axes = Marker(ns=frame, type=Marker.LINE_LIST, frame_locked=True)
+            axes.header.frame_id = robot.prefix + frame
+            axes.pose.orientation.w = 1.0
+            axes.scale.x = 0.02
+            axes.color.a = 1.0
+            axes.points = points
+            axes.colors = [red, red, green, green, blue, blue]
+            markers.append(axes)
+        self.selected_axes_pub.publish(MarkerArray(markers=markers))
+
     def set_robot_selected(self, robot_k):
         for r in self.robots:
             if r.k_robot == robot_k:
@@ -1372,6 +1396,8 @@ class UVMSBackendCore:
                 self.robot_selected = r
                 if r.prefix in self.robot_descriptions:
                     self.selected_description_pub.publish(self.robot_descriptions[r.prefix])
+                if len(self.robots) > 1:
+                    self._publish_selected_axes(r)
                 self.node.get_logger().info(f"Robot {self.robot_selected.prefix} selected for planning.")
                 self._set_camera_frame_for_robot(self.robot_selected)
                 return
