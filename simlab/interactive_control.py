@@ -448,6 +448,8 @@ class InteractiveControlsNode(Node):
             )
 
         for mid, controller_name in self.controller_menu_map.items():
+            if controller_name == "SurfaceInvDyn":
+                self.menu_handler.setVisible(mid, controller_name in selected_robot.list_controllers())
             self.menu_handler.setCheckState(
                 mid,
                 MenuHandler.CHECKED if selected_robot.controller_name == controller_name else MenuHandler.UNCHECKED,

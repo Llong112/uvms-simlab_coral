@@ -1,8 +1,8 @@
-"""Planar surge/heading feedback through SimLab's existing controller interface.
+"""Planar BlueBoat controllers through SimLab's existing controller interface.
 
 State and references use the internal map-NED/body conventions of Robot.
 The output is [Fx, Fy, Fz, Tx, Ty, Tz]; only Fx and Tz are commanded.
-Gains and limits are provisional demonstration settings, not calibrated data.
+The Surface feedback controller uses provisional demonstration gains and limits.
 The C++ allocator remains responsible for individual thruster limits.
 """
 
@@ -110,4 +110,33 @@ class BlueBoatSurfaceController(ControllerTemplate):
     def arm_controller(self, q, q_dot, q_ref, dq_ref, ddq_ref, dt):
         # Compatibility with the existing five-effort transport. BlueBoat's
         # vehicle-only control path will skip arm control and publication.
+        return np.zeros(5, dtype=float)
+
+
+class BlueBoatSurfaceInvDynController(ControllerTemplate):
+    """Feedforward inverse of the surge and yaw equations in BlueBoatNext_reg."""
+
+    name = "BlueBoat surface inverse dynamics"
+    registry_name = "SurfaceInvDyn"
+    supported_robot_types = ("blueboat",)
+
+    def __init__(self, node, arm_dof=0, robot_prefix=""):
+        super().__init__(node, arm_dof, robot_prefix)
+        self.vehicle_dynamics = None
+
+    def vehicle_controller(self, state, target_pos, target_vel, target_acc, dt):
+        wrench = np.zeros(6, dtype=float)
+        model = self.vehicle_dynamics
+        if model is None:
+            return wrench
+
+        u, v, _, _, _, r = self.vector(target_vel, 6, "target_vel")
+        du, _, _, _, _, dr = self.vector(target_acc, 6, "target_acc")
+        drag_x = (model.x_u + model.x_uu * abs(u)) * u
+        drag_n = (model.n_r + model.n_rr * abs(r)) * r
+        wrench[0] = model.m_x_du * du - model.m_y_dv * v * r - drag_x
+        wrench[5] = model.i_z_n_dr * dr - (model.m_x_du - model.m_y_dv) * u * v - drag_n
+        return wrench if np.all(np.isfinite(wrench)) else np.zeros(6, dtype=float)
+
+    def arm_controller(self, q, q_dot, q_ref, dq_ref, ddq_ref, dt):
         return np.zeros(5, dtype=float)

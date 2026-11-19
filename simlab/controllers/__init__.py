@@ -1,5 +1,5 @@
 from simlab.controllers.base import ControllerTemplate
-from simlab.controllers.blueboat import BlueBoatSurfaceController
+from simlab.controllers.blueboat import BlueBoatSurfaceController, BlueBoatSurfaceInvDynController
 from simlab.controllers.cmd_replay import CmdReplayController
 from simlab.controllers.invDyn import LowLevelInvDynController
 from simlab.controllers.pid import LowLevelPidController
@@ -24,6 +24,7 @@ DEFAULT_CONTROLLER_CLASSES = [
     LowLevelInvDynController,
     CmdReplayController,
     BlueBoatSurfaceController,
+    BlueBoatSurfaceInvDynController,
 ]
 
 if OgesModelbasedController is not None and NAMOR_IMPORT_ERROR is None:
@@ -42,6 +43,7 @@ __all__ = [
     "LowLevelInvDynController",
     "LowLevelPidController",
     "BlueBoatSurfaceController",
+    "BlueBoatSurfaceInvDynController",
 ]
 
 if OgesModelbasedController is not None and NAMOR_IMPORT_ERROR is None:

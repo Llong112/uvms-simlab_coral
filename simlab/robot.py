@@ -3027,6 +3027,8 @@ class Robot(Base):
         self._reset_local_command_state()
 
         def _on_reset_success():
+            if request.reset_vehicle and request.set_vehicle_dynamics:
+                self._update_surface_inverse_model(request.vehicle_dynamics)
             if not self.sim_reset_hold:
                 self._path_recording_enabled = True
             if on_success is not None:
@@ -3088,6 +3090,8 @@ class Robot(Base):
                 return
 
             if response is not None and response.success:
+                if dynamics_request.set_vehicle_dynamics:
+                    self._update_surface_inverse_model(dynamics_request.vehicle)
                 self.node.get_logger().info(
                     f"[{self.prefix}] sim dynamics updated: {response.message}"
                 )
@@ -3130,6 +3134,11 @@ class Robot(Base):
             )
     def list_dynamics_profiles(self) -> list[str]:
         return list_robot_dynamics_profiles(robot_type=self.robot_type)
+
+    def _update_surface_inverse_model(self, vehicle_dynamics) -> None:
+        controller = self.controller_instance("SurfaceInvDyn")
+        if controller is not None:
+            controller.vehicle_dynamics = vehicle_dynamics
 
     def _apply_camera_profile_dynamics(
         self,
@@ -3242,6 +3251,8 @@ class Robot(Base):
                 return
 
             if response is not None and response.success:
+                if request.set_vehicle_dynamics:
+                    self._update_surface_inverse_model(request.vehicle)
                 self.active_dynamics_profile = str(profile_name)
                 self.node.get_logger().info(
                     f"[{self.prefix}] dynamics profile '{profile_name}' applied: {response.message}"
