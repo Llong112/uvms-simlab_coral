@@ -682,7 +682,7 @@ class Robot(Base):
         self._replay_settle_config = {}
         self._replay_settle_arm_target = None
         self._replay_settle_vehicle_target = None
-        self.sim_reset_hold = self.is_surface_vehicle
+        self.sim_reset_hold = False
         if not self.node.has_parameter("cmd_replay_record_dir"):
             self.node.declare_parameter("cmd_replay_record_dir", "~/ros_ws/recordings/replay_sessions")
         self.cmd_replay_record_dir = FilePath(
