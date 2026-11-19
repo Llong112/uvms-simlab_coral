@@ -1933,6 +1933,25 @@ class Robot(Base):
                         trajectory_start_xyz,
                         trajectory_start_quat,
                     )
+            if self.is_surface_vehicle:
+                quat = np.asarray(stored_plan_result["quat_wxyz"])
+                if len(quat) < 2 or len(quat) != len(stored_plan_result["xyz"]):
+                    self.node.get_logger().warn("Surface trajectory needs a heading at each XYZ waypoint.")
+                    return
+                start_map = self.world_nwu_to_map_ned(
+                    xyz_world_nwu=trajectory_start_xyz, quat_world_wxyz=trajectory_start_quat,
+                    warn_context="surface trajectory start",
+                )
+                if start_map is None or self.final_goal_map_ned_6 is None:
+                    self.node.get_logger().warn("Surface trajectory needs start and goal headings in map NED.")
+                    return
+                # Both maps are level. A positive world-NWU turn is negative in map NED.
+                start_yaw_ned = start_map[1][2]
+                start_yaw_nwu = 2 * np.arctan2(trajectory_start_quat[3], trajectory_start_quat[0])
+                self._surface_yaw_offset = start_yaw_ned + start_yaw_nwu
+                headings = self._surface_yaw_offset - 2 * np.arctan2(quat[:, 3], quat[:, 0])
+                headings[0], headings[-1] = start_yaw_ned, self.final_goal_map_ned_6[5]
+                self._surface_headings = np.unwrap(headings)
             if self.planner is not None:
                 self.planner.planned_result = stored_plan_result
             self._preserve_active_plan_on_failure = False
@@ -2229,18 +2248,12 @@ class Robot(Base):
             wp_err_trans, wp_err_rot, wp_err_joint, goal_err_trans, goal_err_rot = self.compute_errors()
             goal_xyz_error = np.linalg.norm(goal_err_trans)
 
-            # Calculate the blend factor. Far from the final waypoint, use
-            # the path tangent as yaw reference so the vehicle does not strafe
-            # through waypoint missions. Near the final waypoint, blend to the
-            # goal orientation while preserving continuous, rate-limited yaw.
+            # Measured progress gates XYZ completion. Dory also uses it to
+            # blend from path heading to goal orientation.
             self.yaw_blend_factor = np.clip((self.pos_blend_threshold - goal_xyz_error) / self.pos_blend_threshold, 0.0, 1.0)
             # self.get_logger().info(
             #     f"{robot.yaw_blend_factor} yaw_blend_factor"
             # )
-            hold_yaw = self._last_vehicle_cmd_yaw
-            if hold_yaw is None:
-                hold_yaw = float(self.ned_pose[5])
-
             pos_nwu, vel_nwu, acc_nwu, res = self.vehicle_cart_traj.update(self.yaw_blend_factor)
             if pos_nwu is None:
                 return
@@ -2249,10 +2262,21 @@ class Robot(Base):
             target_vel_nwu = np.asarray(vel_nwu, dtype=float)
             target_acc_nwu = np.asarray(acc_nwu, dtype=float)
 
-            # Pick orientation from nearest OMPL waypoint
-            dists = np.linalg.norm(path_xyz - target_pose_nwu, axis=1)
-            idx = int(np.argmin(dists))
-            target_quat = path_quat[idx]
+            yaw_rate_nwu = yaw_acc_nwu = 0.0
+            if self.is_surface_vehicle:
+                try:
+                    yaw, yaw_rate, yaw_acc = self.vehicle_cart_traj.sample_waypoint_yaw(self._surface_headings)
+                except ValueError as exc:
+                    self.node.get_logger().warn(f"Stopping surface trajectory: {exc}")
+                    self.abrupt_planner_stop()
+                    return
+                half_yaw_nwu = (self._surface_yaw_offset - yaw) / 2
+                target_quat = [np.cos(half_yaw_nwu), 0.0, 0.0, np.sin(half_yaw_nwu)]
+                yaw_rate_nwu, yaw_acc_nwu = -yaw_rate, -yaw_acc
+            else:
+                dists = np.linalg.norm(path_xyz - target_pose_nwu, axis=1)
+                idx = int(np.argmin(dists))
+                target_quat = path_quat[idx]
 
             stamp_now = self.node.get_clock().now().to_msg()
             self.reference_pub.publish_world_targets(
@@ -2261,6 +2285,8 @@ class Robot(Base):
                 quat_world_wxyz=target_quat,
                 vel_world_nwu=target_vel_nwu,
                 acc_world_nwu=target_acc_nwu,
+                yaw_rate_world_nwu=yaw_rate_nwu,
+                yaw_acc_world_nwu=yaw_acc_nwu,
             )
 
 
@@ -2271,7 +2297,8 @@ class Robot(Base):
             )
 
             tw6_world_nwu = np.zeros(6, dtype=float)
-            tw6_world_nwu[0:3] = target_vel_nwu          # linear, keep angular vel zeros
+            tw6_world_nwu[0:3] = target_vel_nwu
+            tw6_world_nwu[5] = yaw_rate_nwu
 
             tw6_map_ned = self.world_nwu_vect6_to_map_ned_vect6(
                 tw6_world_nwu,
@@ -2280,6 +2307,7 @@ class Robot(Base):
 
             acc6_world_nwu = np.zeros(6, dtype=float)
             acc6_world_nwu[0:3] = acc_nwu
+            acc6_world_nwu[5] = yaw_acc_nwu
             acc6_map_ned = self.world_nwu_vect6_to_map_ned_vect6(
                 acc6_world_nwu,
                 warn_context=f"target accel world->map ({self.prefix})",
@@ -2288,32 +2316,26 @@ class Robot(Base):
             if target_pose_map_ned is not None and tw6_map_ned is not None and acc6_map_ned is not None:
                 p_cmd_ned, rpy_cmd_ned = target_pose_map_ned
                 if self.is_surface_vehicle:
-                    rpy_cmd_ned[2] = float(self.final_goal_map_ned_6[5])
-
-                yaw_mode = str(getattr(self, "vehicle_path_yaw_mode", "path_heading")).strip().lower()
-                if yaw_mode == "hold":
-                    path_yaw = float(hold_yaw)
-                elif yaw_mode == "goal":
-                    path_yaw = self.normalize_angle(float(rpy_cmd_ned[2]), float(hold_yaw))
+                    rpy_cmd_ned[2] = yaw
                 else:
-                    path_yaw = self._path_heading_reference_yaw_ned(
-                        tw6_map_ned[:3],
-                        path_xyz,
-                        target_pose_nwu,
-                        idx,
-                        float(hold_yaw),
+                    hold_yaw = self._last_vehicle_cmd_yaw
+                    if hold_yaw is None:
+                        hold_yaw = float(self.ned_pose[5])
+                    yaw_mode = str(getattr(self, "vehicle_path_yaw_mode", "path_heading")).strip().lower()
+                    if yaw_mode == "hold":
+                        path_yaw = float(hold_yaw)
+                    elif yaw_mode == "goal":
+                        path_yaw = self.normalize_angle(float(rpy_cmd_ned[2]), float(hold_yaw))
+                    else:
+                        path_yaw = self._path_heading_reference_yaw_ned(
+                            tw6_map_ned[:3], path_xyz, target_pose_nwu, idx, float(hold_yaw),
+                        )
+                    goal_yaw = self.normalize_angle(float(rpy_cmd_ned[2]), float(path_yaw))
+                    blended_yaw = float(path_yaw) + self.yaw_blend_factor * (goal_yaw - float(path_yaw))
+                    rpy_cmd_ned[2] = self.continuous_vehicle_command_yaw(
+                        blended_yaw, fallback_yaw=self.ned_pose[5],
+                        max_step=float(self.max_yaw_command_rate) * float(self.trajectory_sample_period),
                     )
-
-                # Blend on the unwrapped shortest yaw arc. Directly averaging
-                # angles near +/-pi can command a full turn through zero.
-                goal_yaw = self.normalize_angle(float(rpy_cmd_ned[2]), float(path_yaw))
-                blended_yaw = float(path_yaw) + self.yaw_blend_factor * (goal_yaw - float(path_yaw))
-                max_yaw_step = float(self.max_yaw_command_rate) * float(self.trajectory_sample_period)
-                rpy_cmd_ned[2] = self.continuous_vehicle_command_yaw(
-                    blended_yaw,
-                    fallback_yaw=self.ned_pose[5],
-                    max_step=max_yaw_step,
-                )
 
                 cmd_J_UV = self.vehicle_J(rpy_cmd_ned).full()
                 self.node.get_logger().debug(f"v_cmd_ned {tw6_map_ned} : active.")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from rclpy.node import Node
 from ruckig import InputParameter, OutputParameter, Result, Ruckig, RuckigError
+from scipy.interpolate import BPoly
 
 from simlab.motion_planning.trajectory_generators.base import VehicleTrajectoryGeneratorTemplate
 
@@ -79,6 +80,7 @@ class RuckigVehicleTrajectoryGenerator(VehicleTrajectoryGeneratorTemplate):
         self.inp.max_velocity = max_vel.tolist()
         self.inp.max_acceleration = max_acc.tolist()
         self.inp.max_jerk = max_jerk.tolist()
+        self._yaw_curve = None
         self.active = True
         self.last_result = None
         self.last_yaw_blend_factor = 0.0
@@ -146,6 +148,41 @@ class RuckigVehicleTrajectoryGenerator(VehicleTrajectoryGeneratorTemplate):
             self.active = False
 
         return pos, vel, acc, res
+
+    def sample_waypoint_yaw(self, headings):
+        """Sample unwrapped headings on the current XYZ trajectory's section clock."""
+        if self._yaw_curve is None:
+            times = np.r_[0.0, self.out.trajectory.intermediate_durations]
+            if times.size != headings.size or not np.all(np.isfinite(times)):
+                raise ValueError("XYZ section times do not match the surface heading waypoints")
+            if not np.all(np.isfinite(headings)):
+                raise ValueError("surface heading waypoints must be finite")
+            durations = np.diff(times)
+            turns = np.diff(headings)
+            if np.any(durations < 0.0):
+                raise ValueError("XYZ section times are out of order")
+            if np.any((durations == 0.0) & (np.abs(turns) > 1e-10)):
+                raise ValueError("a yaw change with zero XYZ duration needs a turn-in-place timing policy")
+            keep = np.r_[True, durations > 0.0]
+            times, angles = times[keep], headings[keep]
+            if times.size == 1:
+                return float(angles[0]), 0.0, 0.0
+
+            # Quintic sections share rate and acceleration at each waypoint.
+            # Limit interior slopes to both neighboring secants to avoid overshoot.
+            secants = np.diff(angles) / np.diff(times)
+            left, right = secants[:-1], secants[1:]
+            rates = np.zeros_like(angles)
+            rates[1:-1] = np.where(
+                left * right > 0.0, np.sign(left) * np.minimum(abs(left), abs(right)), 0.0,
+            )
+            knots = np.column_stack((angles, rates, np.zeros_like(angles)))
+            self._yaw_curve = BPoly.from_derivatives(times, knots)
+
+        t = self.out.time
+        if t >= self._yaw_curve.x[-1]:
+            return float(headings[-1]), 0.0, 0.0
+        return tuple(float(self._yaw_curve(t, nu=order)) for order in (0, 1, 2))
 
     def close(self):
         self.active = False

@@ -44,6 +44,8 @@ class ReferenceTargetPublisher:
         quat_world_wxyz: Sequence[float],
         vel_world_nwu: Optional[Sequence[float]] = None,   # [vx, vy, vz]
         acc_world_nwu: Optional[Sequence[float]] = None,   # [ax, ay, az]
+        yaw_rate_world_nwu: float = 0.0,
+        yaw_acc_world_nwu: float = 0.0,
     ) -> None:
         msg = self._last_msg or ReferenceTargets()
         msg.header.stamp = stamp_msg
@@ -55,6 +57,8 @@ class ReferenceTargetPublisher:
         msg.world_pose.orientation.x = float(quat_world_wxyz[1])
         msg.world_pose.orientation.y = float(quat_world_wxyz[2])
         msg.world_pose.orientation.z = float(quat_world_wxyz[3])
+        msg.world_twist.angular.z = float(yaw_rate_world_nwu)
+        msg.world_accel.angular.z = float(yaw_acc_world_nwu)
 
         if vel_world_nwu is not None:
             msg.world_twist.linear.x = float(vel_world_nwu[0])
